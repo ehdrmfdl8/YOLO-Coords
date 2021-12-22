@@ -15,7 +15,8 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
     non_max_suppression, scale_coords, xyxy2xywh, clip_coords, plot_images, xywh2xyxy, box_iou, output_to_target, \
     ap_per_class, set_logging, increment_dir
 from utils.torch_utils import select_device, time_synchronized
-
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
 
 def test(data,
          weights=None,
@@ -66,6 +67,7 @@ def test(data,
 
     # Configure
     model.eval()
+    is_coco = data.endswith('coco.yaml') # is COCO dataset
     with open(data) as f:
         data = yaml.load(f, Loader=yaml.FullLoader)  # model dict
     check_dataset(data)  # check
@@ -74,7 +76,7 @@ def test(data,
     niou = iouv.numel()
 
     # Logging
-    log_imgs = min(log_imgs, 100)  # ceil
+    log_imgs,wandb = min(log_imgs, 100) ,None # ceil
     try:
         import wandb  # Weights & Biases
     except ImportError:
@@ -122,7 +124,7 @@ def test(data,
         # Statistics per image
         for si, pred in enumerate(output):
             labels = targets[targets[:, 0] == si, 1:]
-            nl = len(labels)
+            nl = len(labels) # number of label
             tcls = labels[:, 0].tolist() if nl else []  # target class
             seen += 1
 
@@ -240,26 +242,49 @@ def test(data,
     # Save JSON
     if save_json and len(jdict):
         w = Path(weights[0] if isinstance(weights, list) else weights).stem if weights is not None else ''  # weights
-        file = save_dir / f"detections_val2017_{w}_results.json"  # predicted annotations file
-        print('\nCOCO mAP with pycocotools... saving %s...' % file)
-        with open(file, 'w') as f:
+        anno_json = glob.glob('../yolov5/coco/annotations/instances_val*.json')[0]  # annotations json
+        pred_json = str(save_dir / f"{w}_predictions.json")  # predictions json
+        print('\nEvaluating pycocotools mAP... saving %s...' % pred_json)
+        with open(pred_json, 'w') as f:
             json.dump(jdict, f)
 
         try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
             from pycocotools.coco import COCO
             from pycocotools.cocoeval import COCOeval
 
-            imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]
-            cocoGt = COCO(glob.glob('../coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
-            cocoDt = cocoGt.loadRes(str(file))  # initialize COCO pred api
-            cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
-            cocoEval.params.imgIds = imgIds  # image IDs to evaluate
-            cocoEval.evaluate()
-            cocoEval.accumulate()
-            cocoEval.summarize()
-            map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+            anno = COCO(anno_json)  # init annotations api
+            pred = anno.loadRes(pred_json)  # init predictions api
+            eval = COCOeval(anno, pred, 'bbox')
+            if is_coco:
+                eval.params.imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]  # image IDs to evaluate
+            eval.evaluate()
+            eval.accumulate()
+            eval.summarize()
+            map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
         except Exception as e:
             print('ERROR: pycocotools unable to run: %s' % e)
+    # if save_json and len(jdict):
+    #     w = Path(weights[0] if isinstance(weights, list) else weights).stem if weights is not None else ''  # weights
+    #     file = save_dir / f"detections_val2017_{w}_results.json"  # predicted annotations file
+    #     print('\nCOCO mAP with pycocotools... saving %s...' % file)
+    #     with open(file, 'w') as f:
+    #         json.dump(jdict, f)
+    #
+    #     try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
+    #         from pycocotools.coco import COCO
+    #         from pycocotools.cocoeval import COCOeval
+    #
+    #         imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]
+    #         cocoGt = COCO(glob.glob('../coco/annotations/instances_val2017.json')[0])  # initialize COCO ground truth api
+    #         cocoDt = cocoGt.loadRes(str(file))  # initialize COCO pred api
+    #         cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+    #         cocoEval.params.imgIds = imgIds  # image IDs to evaluate
+    #         cocoEval.evaluate()
+    #         cocoEval.accumulate()
+    #         cocoEval.summarize()
+    #         map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+    #     except Exception as e:
+    #         print('ERROR: pycocotools unable to run: %s' % e)
 
     # Return results
     if not training:
@@ -273,15 +298,15 @@ def test(data,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
-    parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
-    parser.add_argument('--data', type=str, default='data/coco128.yaml', help='*.data path')
-    parser.add_argument('--batch-size', type=int, default=16, help='size of each image batch')
-    parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
+    parser.add_argument('--weights', nargs='+', type=str, default='weights/yolov3.pt', help='model.pt path(s)')
+    parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
+    parser.add_argument('--batch-size', type=int, default=1, help='size of each image batch')
+    parser.add_argument('--img-size', type=int, default=320, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
     parser.add_argument('--save-json', action='store_true', help='save a cocoapi-compatible JSON results file')
     parser.add_argument('--task', default='val', help="'val', 'test', 'study'")
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
